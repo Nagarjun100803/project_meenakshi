@@ -29,7 +29,7 @@ db: pool.SimpleConnectionPool = pool.SimpleConnectionPool(
 
 
 def execute_sql_select_query(
-        sql_statemt: str, 
+        sql_statement: str, 
         vars: tuple | dict | None = None
 ) -> (pd.DataFrame | None):
 
@@ -39,7 +39,7 @@ def execute_sql_select_query(
     cur: pg.extensions.cursor = conn.cursor()
 
     # executing the sql statement
-    cur.execute(sql_statemt, vars = vars) # stores the value in cursor object
+    cur.execute(sql_statement, vars = vars) # stores the value in cursor object
 
     db.putconn(conn) # releasing the connection back to the pool.
 
@@ -94,14 +94,14 @@ def execute_sql_statements(sql: str, vars: tuple | dict | None = None) -> list[t
     return result
   
   
-def get_all_items() -> pd.DataFrame | None : 
+def get_all_items() -> (pd.DataFrame | None) : 
 
     "This function returns all the items list"
 
     sql: str = """
         select 
             i.id as item_id,
-            i.name,
+            upper(i.name),
             i.unit_of_measurement
         from
             items as i
@@ -160,7 +160,7 @@ def get_particular_contribution(
     sql: str = """
 
         select
-            i.name as item,
+            upper(i.name) as item,
             x.quantity,
             i.unit_of_measurement,
             x.donated_at::date as donated_on, 
@@ -201,42 +201,39 @@ def get_particular_contribution(
     return (donar_name, final_df)
 
 
-def make_transactions(
+def create_item_transactions(
         bill_book_code: str,
         bill_id: int,
         item_ids: list[int],
-        quanties: list[int | float]
-) -> (list[tuple] | None):
+        quantities: list[int | float],
+        cur: pg.extensions.cursor,
+) -> (list[tuple]):
     
     """
-        This function is used to insert all the transaction made in a single bill.
+        This function is used to insert all the transactions made in a single bill.
 
         Parameters
         -----------
-        bill_book_code: str is the code of the bill book.   
-        bill_id: int is the unique id/page of particular bill book.
-        item_ids: list[int] is the list of integers that represent the list of item contributed.
-        quantities: list[int | float] is the quantites of each items provided by the donar.
+        bill_book_code: str 
+            Unique code represents particular bill_book eg.B1, B2 etc.   
+        bill_id: int 
+            Unique id/page represents the particular bill entered in the bill book.
+        item_ids: list[int] 
+            The list of integers that represent the list of item contributed.
+        quantities: list[int | float] 
+            The quantites of each items provided by the donar.
         
         Returns
         --------
-            It returns list[tuple[Any]]
+            Returns list[tuple[Any]]:
+                returns the inserted records in transaction table.             
     """
-    if len(item_ids) != len(quanties):
-        # check the number of item id is equal to number of quantites that map each other.
-        print('The item and quanitity size should match')
-        return None
-    
-    # get a database connection from the pool
-    conn: pg.extensions.connection = db.getconn()
-    # cursor object to insert records
-    cur: pg.extensions.cursor = conn.cursor()
 
     sql: str = """
         
         insert into transactions
             (bill_book_code, bill_id, item_id, quantity)
-        ialues
+        values
             %s
         returning *
         ;
@@ -249,40 +246,30 @@ def make_transactions(
         (bill_book_code, bill_id, item_id, quantity) \
             for bill_book_code, bill_id, item_id, quantity \
         in zip(
-            bill_book_code, bill_id, item_ids, quanties, strict = True
+            bill_book_code, bill_id, item_ids, quantities, strict = True
         )
     ]
-    try :
-        # inserting all the transactions
-        execute_values(
-            cur,
-            sql,
-            argslist = values
-        )
-
-        conn.commit() # save the records into the database.
-
-    except UniqueViolation:
-
-        print("Error occur during inserting the record: The item is already exist in this bill.")
-        
-        return None
     
-
-    result: list[tuple] = cur.fetchall() # fetching the inserted record.
     
-    cur.close() # close the cursor.
-    db.putconn(conn) # releasing the connection back to the pool.
+    # inserting all the transactions
+    execute_values(
+        cur,
+        sql,
+        argslist = values
+    )
+
+    result: list[tuple] = cur.fetchall() # fetch the inserted record.
 
     return result
 
 
 
-def insert_bill_records(
+def create_bill_entry(
         bill_book_code: str,
         bill_id: int,
-        donar_name: str | None = None,
-        donar_phone_num: str | None  = None,
+        donar_name: str,
+        donar_phone_num: str,
+        cur: pg.extensions.cursor,
 ) -> (tuple[str, int] | tuple[None, None]): 
     
 
@@ -303,16 +290,11 @@ def insert_bill_records(
             'donar_phone_num': donar_phone_num
         }
 
-    result = (None, None)
-
-    try :
-        # inserting the record
-        result = execute_sql_statements(sql, vars = vars)
-        print("Data is inserted successfully.")
-
-    except UniqueViolation as e:
-        print(f"Error occur during inserting the record: The bill is already exist")
-
+    # inserting the record
+    
+    cur.execute(sql, vars = vars)
+    result: tuple[str, int] = cur.fetchone() # fetch the inserted record.    
+    
     return result
 
 
@@ -384,7 +366,7 @@ def add_new_cooking_team(
     
     return result
 
-def get_inventory() -> pd.DataFrame :
+def get_inventory() -> (pd.DataFrame | None) :
 
     sql : str = """
 
@@ -409,7 +391,7 @@ def get_inventory() -> pd.DataFrame :
 
         select 
             cte1.item_id,
-            i.name as item,
+            upper(i.name) as item,
             (cte1.total_quantity - coalesce(cte2.total_quantity, 0)) as available_quantity, 
             i.unit_of_measurement
             --cte1.total_quantity as total_quantity_taken,
@@ -434,6 +416,72 @@ def get_inventory() -> pd.DataFrame :
 
     return inventory_df
 
+
+def execute_bill_transaction_bundle(
+        bill_book_code: str,
+        bill_id: int,
+        donar_name: str,
+        donar_phone_num: str,
+        item_ids: list[int],
+        quantities: list[int | float],
+) -> (list[tuple] | None) :
+    
+    if len(item_ids) != len(quantities):
+        print("Size of Item and Quantity must equal.")
+        return None
+    
+    conn: pg.extensions.connection = db.getconn()
+    cur: pg.extensions.cursor = conn.cursor()
+
+    try :
+
+        # check whether the bill is already exist or not. if exist use it.
+        sql: str = """
+            select 
+                bill_book_code,
+                bill_id
+            from 
+                bill_books
+            where 
+                (bill_book_code = %(bill_book_code)s and bill_id = %(bill_id)s)
+            ;
+        """
+        cur.execute(sql, vars = {
+            "bill_book_code": bill_book_code,
+            "bill_id": bill_id
+        })
+
+        bill_details: tuple[str, int] | None = cur.fetchone() # fetch the result from the cursor object.
+
+        if not bill_details: 
+            # if there is no bill found with bill_book_code and bill_id in bill_books table, Create it.
+            # first create the bill details.
+            bill_details: tuple[str, int] | tuple[None, None] = create_bill_entry(
+                bill_book_code, bill_id, donar_name, 
+                donar_phone_num, cur
+            ) 
+            
+        # insert transactions associated with the bill.
+        bill_book_code, bill_id = bill_details
+        transactions: list[tuple] | None = create_item_transactions(
+            bill_book_code, bill_id,
+            item_ids, quantities, cur
+        )
+
+        conn.commit() # commit the entire transaction.
+        return transactions
+    
+    except (Exception, UniqueViolation) as e:
+        print(str(e))
+        # print("Error occur during inserting the record: The item is already exist in this bill.")
+        ## undo the changes
+        conn.rollback()
+        print('Roll backing')
+        return None
+
+    finally:
+        cur.close() # close the cursor object
+        db.putconn(conn) # release the connection back to the pool.
 
 
 
