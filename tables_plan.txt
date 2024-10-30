@@ -8,6 +8,8 @@ bill_books -> to store basic detail about particular bill detail.
 	donar_name: varchar | null
 	donar_phone_num: varchar | null
 
+	composite_key: [bill_book_code, bill_id]
+
 items -> to store list of unique items received. 
 -----
 	id: int pkey
@@ -23,9 +25,11 @@ transactions -> to store the items and associated quantites received from the pa
 	quantity: numeric 
 	donated_at: timestamp
 
+	composite_key : [bill_book_code, bill_id, item_id]
+
 cooking_teams -> to store unique cooking teams.
 -------------
-	id: inetger pkey
+	id: integer pkey
 	supervisor_name: varchar unique
 	supervisor_phone_num: varchar | null
 	created_at: timestamp

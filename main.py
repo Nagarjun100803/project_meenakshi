@@ -101,7 +101,7 @@ def get_all_items() -> (pd.DataFrame | None) :
     sql: str = """
         select 
             i.id as item_id,
-            upper(i.name),
+            upper(i.name) as item,
             i.unit_of_measurement
         from
             items as i
@@ -484,6 +484,115 @@ def execute_bill_transaction_bundle(
         db.putconn(conn) # release the connection back to the pool.
 
 
+def check_for_item_availability(
+        item_ids: list[int],
+        quantites: list[int | float]
+) -> (pd.DataFrame):
+    
+    """
+        Returns the items that are requested greater than available quantity.
+
+        Paramters
+        ---------
+        item_ids: list[int]
+            List of item ids requesting to allocate.
+        quantities: list[int | float]
+            List of quantities that maps the item.
+        
+        Returns
+        -------
+        availability_df: pd.DataFrame
+            items which are requested greater than available quantity.
+    """
+    
+    inventory_df: pd.DataFrame = get_inventory() # get the inventory data for all items.
+    required_columns: list[str] = ['item_id', 'item', 'unit_of_measurement', 'available_quantity']
+    required_items_df: pd.DataFrame = inventory_df[required_columns]
+
+    requested_items_df: pd.DataFrame = pd.DataFrame({'item_id': item_ids, 'requested_quantity': quantites}) # create temporary dataframe with input item_ids and quantites for further operations(join).
+
+    final_df: pd.DataFrame = pd.merge(required_items_df, requested_items_df, how ='inner', on ='item_id') # join(inner) the two dataframe to get necessary details of required items.
+
+    avaialability_df: pd.DataFrame = final_df[final_df['available_quantity'] < final_df['requested_quantity']] # filter the items that are requested greater than the available quantity.
+
+    return avaialability_df
+    
+
+def allocate_items_to_cooking_team(
+    cooking_team_id: int,
+    item_ids: list[int],
+    quantities: list[int | float]
+) -> (list[tuple] | None):
+
+    if len(item_ids) != len(quantities):
+        print("Size of Item and Quantity must be same.")
+        return None
+    
+    # check whether the cooking team exists or not.
+    sql: str = """
+        select 
+            *
+        from 
+            cooking_teams
+        where 
+            cooking_teams.id = %(cooking_team_id)s
+        ;
+    """     
+    cooking_team: list[tuple] | None = execute_sql_select_query(sql, vars = {'cooking_team_id': cooking_team_id})
+
+    if cooking_team is None:
+        # if no cooking team is found with the id, we stop the operation and return None.
+        print(f"No cooking team found with this id : {cooking_team_id}.\nPlease create the team to allocate items.")
+        return None
+    
+    # check for the availability of each items to allocate.
+    availability_df: pd.DataFrame = check_for_item_availability(item_ids, quantities)
+
+    if not availability_df.empty:
+        # If any item requested greater than available quantity, we are not perform this operation further, So we return None.
+        # Items requested the quantity greater than available quantity.
+        for _, row in availability_df.iterrows():
+            row: tuple = tuple(row)
+            item_id, item, unit, available_quantity, requested_quantity = row 
+            
+            print(f'You are requesting the item {item} of item_id {item_id} for {requested_quantity} {unit} but the available quantity is {available_quantity} {unit}.')
+        print('\nNote: Please enter the items within the available quantity.')
+
+        return None
+    
+    # If we have all items, Then allocate that to cooking team.
+    conn: pg.extensions.connection = db.getconn() # get a db connection. 
+    cur: pg.extensions.cursor = conn.cursor() # create a cursor object to interact with database.
+
+    cooking_team_ids: list[int] = [cooking_team_id] * len(item_ids) # make the cooking_team_id into list of ids to insert into table. 
+    
+    sql: str = """
+        insert into allocations
+            (cooking_team_id, item_id, quantity)
+        values
+            %s
+        returning *
+    """
+    values: list[tuple] = [
+            (team_id, item_id, quantity) \
+        for team_id, item_id, quantity in zip(
+            cooking_team_ids, item_ids, quantities, strict = True
+        )
+    ]
+
+    try:
+        execute_values(cur, sql, argslist = values) # insert the records
+        conn.commit() # save the data into the database.
+        result: list[tuple] = cur.fetchall() # fetch the inserted record.
+        return result
+    
+    except Exception as e:
+        print(f'Error occur during inserting the record: {str(e)}')
+        return None
+    
+    finally:
+        cur.close() # close the cursor object.
+        db.putconn(conn) # release the back to the pool. 
 
 def main() -> None :
 
@@ -496,7 +605,16 @@ def main() -> None :
     # print(item)
     # items = get_all_items()
     # print(items)
-    pass
+
+    # result = check_for_item_availability([1, 2, 10], [114,5,5])
+    # print(result)
+    allocations = allocate_items_to_cooking_team(
+        2, [1, 1, 1], [5, 3, 4]
+    )
+    if allocations:
+        print("All items inserted successfully.")
+
+    
 
 
 if __name__ == '__main__':
