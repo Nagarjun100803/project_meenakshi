@@ -3,12 +3,14 @@
     Date: Mon Oct 21, 9:10 am
 """
 
+from decimal import Decimal
 from typing import Literal
 import psycopg2 as pg 
 from psycopg2 import pool
 import pandas as pd 
 from psycopg2.extras import execute_values
 from psycopg2.errors import UniqueViolation
+from psycopg2.extras import RealDictCursor
 
 
 #Database Setup
@@ -19,7 +21,8 @@ connection_params: dict[str, str] = {
         'host': 'localhost',
         'database': 'meenakshi',
         'password': 'arju@123',
-        'user': 'postgres'
+        'user': 'postgres',
+        "cursor_factory": RealDictCursor
     }
 
 db: pool.SimpleConnectionPool = pool.SimpleConnectionPool(
@@ -44,36 +47,34 @@ def execute_sql_select_query(
     db.putconn(conn) # releasing the connection back to the pool.
 
     #fetching the data from the cursor
-    data: list[tuple] | None = cur.fetchall()
+    data: RealDictCursor | None = cur.fetchall()
 
     if not data:
         # if the result is empty list then we return None
         return None
     
-    #fetching all the columns from the cursor object 
-    descriptions: list[pg.extensions.Column] = cur.description
+    df = pd.DataFrame(data)
+    df = df.map(lambda x: float(x) if isinstance(x, Decimal) else x)
 
-    column_names: list[str] = [description.name for description in descriptions]
-
-    #creating the final result as pandas DataFrame object
-    df: pd.DataFrame = pd.DataFrame(
-        data = data,
-        columns = column_names
-    )
     #closing the cursor object
     cur.close()
     
     return df
 
-def execute_sql_statements(sql: str, vars: tuple | dict | None = None) -> list[tuple] : 
+def execute_sql_statements(
+        sql: str, vars: tuple | dict | None = None, 
+        # fetch: Literal["all", "one", "no_fetch"] = "no_fetch"
+) -> list[tuple] : 
 
     """
         This function is used to execute the sql statements specially Insert clause except Select clause
 
-        Args:
-        ----
-            sql: str is a sql statement.
-            vars: tuple is a parameter which need to insert.
+        Args
+        -----
+            sql: str 
+                sql statement.
+            vars: tuple 
+                A parameter which need to insert.
     """
 
     # creating a new connection.
@@ -88,7 +89,7 @@ def execute_sql_statements(sql: str, vars: tuple | dict | None = None) -> list[t
     conn.commit()
     db.putconn(conn) # releasing the connection back to the pool.
 
-    result: list[tuple] = cur.fetchall() # fetching results from a cur obj.
+    result: list[RealDictCursor] = cur.fetchall() # fetching results from a cur obj.
     cur.close()
     
     return result
@@ -101,10 +102,12 @@ def get_all_items() -> (pd.DataFrame | None) :
     sql: str = """
         select 
             i.id as item_id,
-            upper(i.name) as item,
+            initcap(i.name) as item,
             i.unit_of_measurement
         from
             items as i
+        order by 
+            i.id
     """    
     items_df = execute_sql_select_query(sql)
     
@@ -149,18 +152,28 @@ def get_particular_contribution(
 ) -> (tuple[str, pd.DataFrame] | tuple[None, None]): 
     
     """
-    This returns the contribution of a particular bill with a donar_name
-    
+    This function returns the items contributed in a particular bill.
+
+    Parameter
+    ----------
+    bill_book_code: str 
+        Unique code represents particular bill_book eg.B1, B2 etc.   
+    bill_id: int 
+        Unique id/page represents the particular bill entered in the bill book.
+        
     Returns
-    -------
-        Donar Name : str
-        Contribuion: pd.DataFrame
+    --------
+        tuple[str, pd.DataFrame] 
+            which is the donar name and the contribution if bill found with bill_id and bill_book_code.
+        tuple[None, None] 
+            if no bill is found with bill_id and bill_book_code.
+
     """
 
     sql: str = """
 
         select
-            upper(i.name) as item,
+            initcap(i.name) as item,
             x.quantity,
             i.unit_of_measurement,
             x.donated_at::date as donated_on, 
@@ -191,6 +204,7 @@ def get_particular_contribution(
     })
     
     if contribution_df is None:
+        print("The contribution df is ", contribution_df)
         return (None, None)
     
     donar_column: str = 'donar_name'
@@ -201,101 +215,6 @@ def get_particular_contribution(
     return (donar_name, final_df)
 
 
-def create_item_transactions(
-        bill_book_code: str,
-        bill_id: int,
-        item_ids: list[int],
-        quantities: list[int | float],
-        cur: pg.extensions.cursor,
-) -> (list[tuple]):
-    
-    """
-        This function is used to insert all the transactions made in a single bill.
-
-        Parameters
-        -----------
-        bill_book_code: str 
-            Unique code represents particular bill_book eg.B1, B2 etc.   
-        bill_id: int 
-            Unique id/page represents the particular bill entered in the bill book.
-        item_ids: list[int] 
-            The list of integers that represent the list of item contributed.
-        quantities: list[int | float] 
-            The quantites of each items provided by the donar.
-        
-        Returns
-        --------
-            Returns list[tuple[Any]]:
-                returns the inserted records in transaction table.             
-    """
-
-    sql: str = """
-        
-        insert into transactions
-            (bill_book_code, bill_id, item_id, quantity)
-        values
-            %s
-        returning *
-        ;
-
-    """
-    bill_book_code = [bill_book_code] * len(item_ids)
-    bill_id = [bill_id] * len(item_ids)
-
-    values: list[tuple] = [
-        (bill_book_code, bill_id, item_id, quantity) \
-            for bill_book_code, bill_id, item_id, quantity \
-        in zip(
-            bill_book_code, bill_id, item_ids, quantities, strict = True
-        )
-    ]
-    
-    
-    # inserting all the transactions
-    execute_values(
-        cur,
-        sql,
-        argslist = values
-    )
-
-    result: list[tuple] = cur.fetchall() # fetch the inserted record.
-
-    return result
-
-
-
-def create_bill_entry(
-        bill_book_code: str,
-        bill_id: int,
-        donar_name: str,
-        donar_phone_num: str,
-        cur: pg.extensions.cursor,
-) -> (tuple[str, int] | tuple[None, None]): 
-    
-
-    sql: str = """
-
-        insert into bill_books 
-            (bill_book_code, bill_id, donar_name, donar_phone_num)
-        values 
-            (%(bill_book_code)s, %(bill_id)s, %(donar_name)s, %(donar_phone_num)s)
-        returning 
-            bill_book_code, bill_id
-        ;
-    """
-    vars: dict[str, str | int | None] = {
-            'bill_book_code': bill_book_code,
-            'bill_id': bill_id,
-            'donar_name': donar_name,
-            'donar_phone_num': donar_phone_num
-        }
-
-    # inserting the record
-    
-    cur.execute(sql, vars = vars)
-    result: tuple[str, int] = cur.fetchone() # fetch the inserted record.    
-    
-    return result
 
 
 def add_new_items(
@@ -310,6 +229,26 @@ def add_new_items(
     if not item_name:
         print('Item name must include')
         return None
+    
+    # Check the item is already exists in our database.
+
+    existance_check_sql: str = """
+        select 
+            1
+        from 
+            items as i 
+        where 
+            i.name like lower(%(item_name)s)
+        ;
+    """
+
+    previous_record = execute_sql_select_query(existance_check_sql, vars = {"item_name": item_name})
+
+    if previous_record is not None:
+        print(previous_record)
+        return None
+    
+    item_name = item_name.strip().lower() # standardizing the item names for backend convenience.
     
     sql: str = """
         
@@ -337,7 +276,7 @@ def add_new_cooking_team(
         supervisor_name: str, 
         supervisor_phone_num: str | None = None,         
 ) -> (tuple | None):
-    
+    # need to fix the empty strings ' '
     if not supervisor_name:
         print('Supervisor name must include')
         return None
@@ -391,11 +330,11 @@ def get_inventory() -> (pd.DataFrame | None) :
 
         select 
             cte1.item_id,
-            upper(i.name) as item,
+            initcap(i.name) as item,
             (cte1.total_quantity - coalesce(cte2.total_quantity, 0)) as available_quantity, 
             i.unit_of_measurement
-            --cte1.total_quantity as total_quantity_taken,
-            --cte2.total_quantity as total_quantity_given
+            -- cte1.total_quantity as total_quantity_taken,
+            -- cte2.total_quantity as total_quantity_given
         from 
             cte1
         left join 
@@ -417,73 +356,6 @@ def get_inventory() -> (pd.DataFrame | None) :
     return inventory_df
 
 
-def execute_bill_transaction_bundle(
-        bill_book_code: str,
-        bill_id: int,
-        donar_name: str,
-        donar_phone_num: str,
-        item_ids: list[int],
-        quantities: list[int | float],
-) -> (list[tuple] | None) :
-    
-    if len(item_ids) != len(quantities):
-        print("Size of Item and Quantity must equal.")
-        return None
-    
-    conn: pg.extensions.connection = db.getconn()
-    cur: pg.extensions.cursor = conn.cursor()
-
-    try :
-
-        # check whether the bill is already exist or not. if exist use it.
-        sql: str = """
-            select 
-                bill_book_code,
-                bill_id
-            from 
-                bill_books
-            where 
-                (bill_book_code = %(bill_book_code)s and bill_id = %(bill_id)s)
-            ;
-        """
-        cur.execute(sql, vars = {
-            "bill_book_code": bill_book_code,
-            "bill_id": bill_id
-        })
-
-        bill_details: tuple[str, int] | None = cur.fetchone() # fetch the result from the cursor object.
-
-        if not bill_details: 
-            # if there is no bill found with bill_book_code and bill_id in bill_books table, Create it.
-            # first create the bill details.
-            bill_details: tuple[str, int] | tuple[None, None] = create_bill_entry(
-                bill_book_code, bill_id, donar_name, 
-                donar_phone_num, cur
-            ) 
-            
-        # insert transactions associated with the bill.
-        bill_book_code, bill_id = bill_details
-        transactions: list[tuple] | None = create_item_transactions(
-            bill_book_code, bill_id,
-            item_ids, quantities, cur
-        )
-
-        conn.commit() # commit the entire transaction.
-        return transactions
-    
-    except (Exception, UniqueViolation) as e:
-        print(str(e))
-        # print("Error occur during inserting the record: The item is already exist in this bill.")
-        ## undo the changes
-        conn.rollback()
-        print('Roll backing')
-        return None
-
-    finally:
-        cur.close() # close the cursor object
-        db.putconn(conn) # release the connection back to the pool.
-
-
 def check_for_item_availability(
         item_ids: list[int],
         quantites: list[int | float]
@@ -492,7 +364,7 @@ def check_for_item_availability(
     """
         Returns the items that are requested greater than available quantity.
 
-        Paramters
+        Parameters
         ---------
         item_ids: list[int]
             List of item ids requesting to allocate.
@@ -594,30 +466,148 @@ def allocate_items_to_cooking_team(
         cur.close() # close the cursor object.
         db.putconn(conn) # release the back to the pool. 
 
+def get_allocations() -> pd.DataFrame:
+
+    sql: str = """
+        select 
+            a.cooking_team_id,
+            upper(c.supervisor_name) as supervisor_name,
+            --c.supervisor_phone_num,
+            initcap(i.name) as item,
+            a.quantity,
+            i.id as item_id,
+            i.unit_of_measurement,
+            a.allocated_at::date as alloacted_on,
+            to_char(a.allocated_at, 'HH12 : MI : SS AM') as allocated_at
+        from 
+            allocations as a
+        join 
+            cooking_teams as c
+        on 
+            a.cooking_team_id = c.id
+        join 
+            items as i 
+        on 
+            a.item_id = i.id
+        order by 
+            a.allocated_at
+        ;
+    """
+    alloactions = execute_sql_select_query(sql)
+
+    return alloactions    
+
+
+def is_bill_exists(
+    bill_book_code: str, 
+    bill_id: int, 
+    cur: pg.extensions.cursor | None = None
+) -> bool: 
+    
+    """
+        Helper function used to check the bill is already created.
+    """
+    sql: str = """
+        select 
+            1 as bill_exist
+        from 
+            bill_books
+        where 
+            bill_book_code = %(bill_book_code)s and 
+            bill_id = %(bill_id)s
+        ;
+    """
+    
+    if not cur: 
+        conn: pg.extensions.connection = db.getconn()
+        cur: pg.extensions.cursor = conn.cursor()
+        cur.execute(sql, vars = {"bill_book_code": bill_book_code, "bill_id": bill_id})
+        db.putconn(conn)
+    else:
+        cur.execute(sql, vars = {"bill_book_code": bill_book_code, "bill_id": bill_id})
+
+    result = cur.fetchone()
+
+    return bool(result)    
+
+
+def create_new_bill_record(
+    bill_book_code: str, 
+    bill_id: int, 
+    contributor_name: str, 
+    contributor_phone_num: str, 
+    contribution_df: pd.DataFrame
+):
+
+    conn: pg.extensions.connection = db.getconn()
+    cur: pg.extensions.cursor = conn.cursor()
+
+    try:
+
+        previous_bill_record = is_bill_exists(bill_book_code, bill_id, cur)
+
+        if not previous_bill_record:
+            # Create the bill record. 
+            create_bill_entry_sql: str = """
+                insert into bill_books(
+                    bill_book_code, bill_id, donar_name, donar_phone_num
+                )
+                values(
+                    %(bill_book_code)s, %(bill_id)s, %(donar_name)s, %(donar_phone_num)s
+                );
+            """
+            new_record = cur.execute(
+                create_bill_entry_sql, {
+                    "bill_book_code": bill_book_code, "bill_id": bill_id, 
+                    "donar_name": contributor_name, "donar_phone_num": contributor_phone_num
+                }
+            )
+
+        # # Create transactions.
+        contribution_df["item_ids"] = contribution_df["items"].str.split("-").str[0].astype(int)
+        contribution_df["bill_book_code"] = bill_book_code
+        contribution_df["bill_id"] = bill_id
+        contribution_df.drop("items", axis = 1, inplace = True)
+
+        # print(contribution_df)
+        # return contribution_df.to_dict("records")
+
+        create_transactions_sql: str = """
+            insert into 
+                transactions(
+                    bill_book_code, bill_id, item_id, quantity
+                )
+            values
+                %s
+            ;
+        """
+        execute_values(
+            cur, create_transactions_sql, 
+            argslist = contribution_df.to_dict("records"),
+            template = "(%(bill_book_code)s, %(bill_id)s, %(item_ids)s, %(quantity)s)"
+        )
+
+        conn.commit()
+
+        print("All records inserted")
+
+    except Exception as e: 
+        conn.rollback()
+        print(str(e))
+        raise e
+
+    finally:
+        cur.close()
+        db.putconn(conn)
+
+
+
+
+
 def main() -> None :
-
-    # result = get_inventory()
-    # print('Available Products are : \n')
-    # print(result)
-    
-    # item = add_new_items('godhumai', 'Kg')
-
-    # print(item)
-    # items = get_all_items()
-    # print(items)
-
-    # result = check_for_item_availability([1, 2, 10], [114,5,5])
-    # print(result)
-    allocations = allocate_items_to_cooking_team(
-        2, [1, 1, 1], [5, 3, 4]
-    )
-    if allocations:
-        print("All items inserted successfully.")
-
-    
+    pass
 
 
 if __name__ == '__main__':
     "Checking if the main file is executed directly"
     main()
-
