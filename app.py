@@ -17,7 +17,8 @@ from main import (
     get_particular_contribution, 
     add_new_items,
     get_allocations, 
-    create_new_bill_record, is_bill_exists
+    create_new_bill_record, is_bill_exists, 
+    settings
 )
 
 
@@ -127,7 +128,7 @@ def main() -> None:
 
                 if st.form_submit_button("Continue and Add Item"):
                     if username and password:
-                        if username == "user" and password == "123":
+                        if username == settings.admin_username and password == settings.admin_password:
                             result = add_new_items(item_name = item_name, unit_of_measurement = unit_of_measurement)
                             if not result:
                                 st.error(f"{item_name} already exists")

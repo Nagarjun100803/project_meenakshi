@@ -11,17 +11,38 @@ import pandas as pd
 from psycopg2.extras import execute_values
 from psycopg2.errors import UniqueViolation
 from psycopg2.extras import RealDictCursor
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
+
+class Settings(BaseSettings):
+
+    db_user: str 
+    db_name: str 
+    db_password: str 
+    db_host: str 
+    db_port: int 
+
+    admin_username: str 
+    admin_password: str 
+
+
+    model_config = SettingsConfigDict(env_file = ".env")
+
+
+settings = Settings()
+
+    
 
 #Database Setup
 
 #connection parameters
 connection_params: dict[str, str] = {
 
-        'host': 'localhost',
-        'database': 'meenakshi',
-        'password': 'arju@123',
-        'user': 'postgres',
+        'host': settings.db_host,
+        'database': settings.db_name,
+        'password': settings.db_password,
+        'user': settings.db_user,
         "cursor_factory": RealDictCursor
     }
 
@@ -29,6 +50,8 @@ db: pool.SimpleConnectionPool = pool.SimpleConnectionPool(
     minconn = 4, maxconn = 12,
     **connection_params
 )
+
+  
 
 
 def execute_sql_select_query(
@@ -603,6 +626,67 @@ def create_new_bill_record(
 
 
 
+
+def inititalize_db_tables() -> None:
+
+    sql: str = """
+        create table if not exists items(
+            id serial primary key, 
+            name varchar(100) not null unique, 
+            unit_of_measurement varchar(10) not null, 
+            created_at timestamp default now()
+        ); 
+
+        create table if not exists bill_books(
+            bill_book_code varchar(5) not null,
+	        bill_id integer not null,
+	        donar_name varchar(100),
+	        donar_phone_num varchar(12),
+
+	        unique(bill_book_code, bill_id)
+        );
+
+        create table if not exists transactions(
+            bill_book_code integer references bill_books(bill_book_code) not null,
+            bill_id integer references bill_books(bill_id) not null,
+            item_id integer references items(id) not null,
+            quantity numeric not null, 
+            donated_at timestamp not null default now(),
+
+            unique(bill_book_code, bill_id, item_id)
+
+        );
+        
+        create table if not exists cooking_teams(
+            id serial primary key,
+            supervisor_name varchar(200) not null unique,
+            supervisor_phone_num varchar(12) not null unique,
+            created_at timestamp not null default now()
+        );
+
+        create table if not exists allocations(
+            allocation_id serial primary key,
+            cooking_team_id integer references cooking_teams(id) not null,
+            item_id integer references items(id) not null,
+            quantity numeric not null,
+            allocated_at timestamp not null default now()
+        );	
+    
+    """
+
+    conn = db.getconn()
+    cur = conn.cursor()
+
+    cur.execute(sql)
+    conn.commit()
+
+    db.putconn(conn)
+
+    print("All Tables Initialized")
+
+
+inititalize_db_tables()
+    
 
 def main() -> None :
     pass
