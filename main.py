@@ -12,6 +12,7 @@ from psycopg2.extras import execute_values
 from psycopg2.errors import UniqueViolation
 from psycopg2.extras import RealDictCursor
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import pandas as pd
 
 
 
@@ -51,8 +52,8 @@ db: pool.SimpleConnectionPool = pool.SimpleConnectionPool(
     **connection_params
 )
 
-  
 
+ 
 
 def execute_sql_select_query(
         sql_statement: str, 
@@ -411,12 +412,14 @@ def check_for_item_availability(
     avaialability_df: pd.DataFrame = final_df[final_df['available_quantity'] < final_df['requested_quantity']] # filter the items that are requested greater than the available quantity.
 
     return avaialability_df
+        
     
 
 def allocate_items_to_cooking_team(
-    cooking_team_id: int,
+    cooking_team_id: int, 
     item_ids: list[int],
-    quantities: list[int | float]
+    quantities: list[int | float], 
+    dish: str | None = None,
 ) -> (list[tuple] | None):
 
     if len(item_ids) != len(quantities):
@@ -437,41 +440,41 @@ def allocate_items_to_cooking_team(
 
     if cooking_team is None:
         # if no cooking team is found with the id, we stop the operation and return None.
-        print(f"No cooking team found with this id : {cooking_team_id}.\nPlease create the team to allocate items.")
-        return None
+        raise ValueError(f"No cooking team found with this id : {cooking_team_id}.\nPlease create the team to allocate items.")
     
-    # check for the availability of each items to allocate.
-    availability_df: pd.DataFrame = check_for_item_availability(item_ids, quantities)
+    # # check for the availability of each items to allocate.
+    # availability_df: pd.DataFrame = check_for_item_availability(item_ids, quantities)
 
-    if not availability_df.empty:
-        # If any item requested greater than available quantity, we are not perform this operation further, So we return None.
-        # Items requested the quantity greater than available quantity.
-        for _, row in availability_df.iterrows():
-            row: tuple = tuple(row)
-            item_id, item, unit, available_quantity, requested_quantity = row 
+    # if not availability_df.empty:
+    #     # If any item requested greater than available quantity, we are not perform this operation further, So we return None.
+    #     # Items requested the quantity greater than available quantity.
+    #     for _, row in availability_df.iterrows():
+    #         row: tuple = tuple(row)
+    #         item_id, item, unit, available_quantity, requested_quantity = row 
             
-            print(f'You are requesting the item {item} of item_id {item_id} for {requested_quantity} {unit} but the available quantity is {available_quantity} {unit}.')
-        print('\nNote: Please enter the items within the available quantity.')
+    #         print(f'You are requesting the item {item} of item_id {item_id} for {requested_quantity} {unit} but the available quantity is {available_quantity} {unit}.')
+    #     print('\nNote: Please enter the items within the available quantity.')
 
-        return None
+    #     return None
     
     # If we have all items, Then allocate that to cooking team.
     conn: pg.extensions.connection = db.getconn() # get a db connection. 
     cur: pg.extensions.cursor = conn.cursor() # create a cursor object to interact with database.
 
     cooking_team_ids: list[int] = [cooking_team_id] * len(item_ids) # make the cooking_team_id into list of ids to insert into table. 
-    
+    dishes: list = [dish] * len(item_ids)
+
     sql: str = """
         insert into allocations
-            (cooking_team_id, item_id, quantity)
+            (cooking_team_id, item_id, quantity, dish)
         values
             %s
         returning *
     """
     values: list[tuple] = [
-            (team_id, item_id, quantity) \
-        for team_id, item_id, quantity in zip(
-            cooking_team_ids, item_ids, quantities, strict = True
+            (team_id, item_id, quantity, dish) \
+        for team_id, item_id, quantity, dish in zip(
+            cooking_team_ids, item_ids, quantities, dishes, strict = True
         )
     ]
 
@@ -630,48 +633,45 @@ def create_new_bill_record(
 def inititalize_db_tables() -> None:
 
     sql: str = """
-        create table if not exists items(
-            id serial primary key, 
-            name varchar(100) not null unique, 
-            unit_of_measurement varchar(10) not null, 
-            created_at timestamp default now()
-        ); 
+          create table if not exists items (
+        id serial primary key, 
+        name varchar(100) not null unique, 
+        unit_of_measurement varchar(10) not null, 
+        created_at timestamp default now()
+    ); 
 
-        create table if not exists bill_books(
-            bill_book_code varchar(5) not null,
-	        bill_id integer not null,
-	        donar_name varchar(100),
-	        donar_phone_num varchar(12),
+    create table if not exists bill_books (
+        bill_book_code varchar(5) not null,
+        bill_id integer not null,
+        donar_name varchar(100),
+        donar_phone_num varchar(12),
+        unique(bill_book_code, bill_id)
+    );
 
-	        unique(bill_book_code, bill_id)
-        );
+    create table if not exists transactions (
+        bill_book_code varchar(5) not null,
+        bill_id integer not null,
+        item_id integer not null references items(id),
+        quantity numeric not null, 
+        donated_at timestamp not null default now(),
+        unique(bill_book_code, bill_id, item_id),
+        foreign key (bill_book_code, bill_id) references bill_books(bill_book_code, bill_id)
+    );
 
-        create table if not exists transactions(
-            bill_book_code integer references bill_books(bill_book_code) not null,
-            bill_id integer references bill_books(bill_id) not null,
-            item_id integer references items(id) not null,
-            quantity numeric not null, 
-            donated_at timestamp not null default now(),
+    create table if not exists cooking_teams (
+        id serial primary key,
+        supervisor_name varchar(200) not null unique,
+        supervisor_phone_num varchar(12) not null unique,
+        created_at timestamp not null default now()
+    );
 
-            unique(bill_book_code, bill_id, item_id)
-
-        );
-        
-        create table if not exists cooking_teams(
-            id serial primary key,
-            supervisor_name varchar(200) not null unique,
-            supervisor_phone_num varchar(12) not null unique,
-            created_at timestamp not null default now()
-        );
-
-        create table if not exists allocations(
-            allocation_id serial primary key,
-            cooking_team_id integer references cooking_teams(id) not null,
-            item_id integer references items(id) not null,
-            quantity numeric not null,
-            allocated_at timestamp not null default now()
-        );	
-    
+    create table if not exists allocations (
+        allocation_id serial primary key,
+        cooking_team_id integer not null references cooking_teams(id),
+        item_id integer not null references items(id),
+        quantity numeric not null,
+        allocated_at timestamp not null default now()
+    );
     """
 
     conn = db.getconn()
@@ -685,12 +685,21 @@ def inititalize_db_tables() -> None:
     print("All Tables Initialized")
 
 
+def get_all_cooking_teams():
+    sql: str = "select * from cooking_teams;"
+
+    cooking_teams = execute_sql_select_query(sql)
+
+    return cooking_teams
+
+
 inititalize_db_tables()
     
 
 def main() -> None :
+    
     pass
-
+    
 
 if __name__ == '__main__':
     "Checking if the main file is executed directly"
